@@ -8,126 +8,97 @@ import sys
 import re
 from tqdm import tqdm
 from collections import Counter
+from ocrfixr import unsplit, spellcheck
 
+def load_text(file_path):
+    """Load text from a file."""
+    with open(file_path, 'r', encoding='utf-8') as file:
+        return file.read()
 
-def main():
-  
-    parser = argparse.ArgumentParser(prog ='run_ocrfixr',
-                                     description ='Provides context-based spellcheck suggestions for input text.')
-    
-  
-    parser.add_argument('text', 
-                         help ='path to text you want to spellcheck')
-    parser.add_argument('outfile', 
-                         help ='path to output file')
-    parser.add_argument('-Warp10', action ='store_const', const = True,
-                        default = False, dest ='Warp10',
-                         help ="option to ignore the most common misspells, which are likely correct words.")
-    parser.add_argument('-context', action ='store_const', const = True,
-                        default = False, dest ='context',
-                         help ="option to add local context of suggested change.")
-    parser.add_argument('-misspells', action ='store_const', const = True,
-                        default = False, dest ='misspells',
-                         help ="option to return all of the words OCRfixr didn't recognize.")
-    
+def save_text(file_path, text):
+    """Save text to a file."""
+    with open(file_path, 'w', encoding='utf-8') as file:
+        file.write(text)
 
-    args = parser.parse_args()
-    
-    ### Read in file ============================================================
-    # read in full file to check if the text has split words (which will cause false misreads to show up)
-    # -- do this first to throw error early if file is invalid
-    print("---- Loading text....")
-    Full_Book = open(sys.argv[1], 'r',encoding='utf-8').read()
-    
-    if len(re.findall("[A-z]-\n", Full_Book)) > 30:
+def count_misspells(text, min_len):
+    """Count misspelled words in the text."""
+    misreads = spellcheck(text)._LIST_MISREADS()
+    filtered_misreads = [word for word in misreads if len(word) > min_len]
+    counts = dict(Counter(filtered_misreads))
+    return dict(sorted(counts.items(), key=lambda item: -item[1]))
+
+def handle_split_words(text):
+    """Handle split words in the text."""
+    if len(re.findall("[A-z]-\n", text)) > 30:
         print("---- This file appears to have words split across lines, which can cause issues with the spellchecker")
         print("---- Merging split words back together...")
-        from ocrfixr import unsplit
-        fixed_text = unsplit(Full_Book).fix()
-        data = fixed_text.split("\n")
+        fixed_text = unsplit(text).fix()
+        return fixed_text.split("\n")
     else:
-        data = Full_Book.split("\n")
-    
-        
-    from ocrfixr import spellcheck
-    
-    # Add line numbers
-    q = []
-    for (number, line) in enumerate(data):
-        q.append('%d:  %s' % (number + 1, line))
-        
-        
-    # Define misspells counter function
-    # Used by both -Warp10 and -misspells flags
-    def ct_misspells(text, min_len):
-        M = spellcheck(text)._LIST_MISREADS()
-        M = [word for word in M if len(word) > min_len]
-        counts = dict(Counter(M))
-        counts = dict(sorted(counts.items(), key=lambda item: -item[1]))
-        return(counts)
+        return text.split("\n")
 
-
-    ### Misspells Option ============================================================
-    # Have OCRfixr just output a list of all the words it checked (ranked by frequency), rather than spellchecking
-    # This is intended as a diagnostic measure to see if OCRfixr is missing a large number of suggestions for valid (fixable) words
-
-    if args.misspells == True:
-        counts = ct_misspells(Full_Book,0)
-        with open(args.outfile,'w',encoding='utf-8') as f:  
-            for key, value in counts.items():  
-                f.write('%s:%s\n' % (key, value))
-        print("---- File has been written to " + sys.argv[2])
-
-        # for this path, don't continue any further
-        exit()
-        
-        
-    ### WARP10 Option ============================================================
-    # Have OCRfixr ignore any word (>3 characters long) that pops up 10+ times
-    # This allows for unrecognized words that are likely correct to be left alone, since they show up consistently in the text
-    # OCRfixr runs fewer check cycles = faster execution
-    
-    if args.Warp10 == True:
-        print("---- Engaging Warp10!")
-        counts = ct_misspells(Full_Book,3)
-        over_ten = {key:value for (key,value) in counts.items() if value >= 10}
-        
-        print("---- To speed things up, OCRfixr will ignore the following unrecognized words that popped up 10 or more times in the text:")
-        if len(over_ten) == 0:
-            print("NO WORDS IGNORED!")
-        else:
-            for k, v in over_ten.items():
-                print(k, '-->', v)
-        ignored_words = list(over_ten.keys())
-    
-
+def get_ignored_words(full_text, min_len):
+    """Get words to be ignored if they appear more than 10 times."""
+    counts = count_misspells(full_text, min_len)
+    over_ten = {key: value for key, value in counts.items() if value >= 10}
+    print("---- To speed things up, OCRfixr will ignore the following unrecognized words that popped up 10 or more times in the text:")
+    if len(over_ten) == 0:
+        print("NO WORDS IGNORED!")
     else:
-        ignored_words = []  
-        
-    if args.context == True:
-        context_fl = "T"
-    else: 
-        context_fl = "F"
-    
-    
-    ### Run spellcheck on each line ==================================================
-    print("---- Running spellcheck....")
-    
+        for k, v in over_ten.items():
+            print(f"{k} --> {v}")
+    return list(over_ten.keys())
+
+def process_lines(data, ignored_words, context_fl):
+    """Run spellcheck on each line and collect suggestions."""
     suggestions = []
-    for i in tqdm(q):
-        fixes = spellcheck(i, changes_by_paragraph = "T", return_context = context_fl, ignore_words = ignored_words).fix()
-        if fixes == "NOTE: No changes made to text":
-            pass
-        else:
+    for i in tqdm(data):
+        fixes = spellcheck(i, changes_by_paragraph="T", return_context=context_fl, ignore_words=ignored_words).fix()
+        if fixes != "NOTE: No changes made to text":
             for x in fixes.split("\n"):
-                suggestions.append(''.join((' '.join(re.findall('^[0-9]+:', i)), x)))
-    
+                line_number = ' '.join(re.findall('^[0-9]+:', i))
+                suggestions.append(f"{line_number} {x}")
+    return suggestions
 
-   ### Output file =================================================================
-    file=open(args.outfile,'w',encoding='utf-8')
-    for items in suggestions:
-        file.writelines(items+'\n')
-    file.close()
+def main():
+    parser = argparse.ArgumentParser(prog='run_ocrfixr',
+                                     description='Provides context-based spellcheck suggestions for input text.')
     
-    print("---- File has been written to " + sys.argv[2])
+    parser.add_argument('text', help='path to text you want to spellcheck')
+    parser.add_argument('outfile', help='path to output file')
+    parser.add_argument('-Warp10', action='store_true', help="option to ignore the most common misspells, which are likely correct words.")
+    parser.add_argument('-context', action='store_true', help="option to add local context of suggested change.")
+    parser.add_argument('-misspells', action='store_true', help="option to return all of the words OCRfixr didn't recognize.")
+    
+    args = parser.parse_args()
 
+    # Read and process the text
+    print("---- Loading text....")
+    full_text = load_text(args.text)
+    data = handle_split_words(full_text)
+
+    # Add line numbers
+    data = [f'{number + 1}:  {line}' for number, line in enumerate(data)]
+
+    # Handle misspells option
+    if args.misspells:
+        counts = count_misspells(full_text, 0)
+        save_text(args.outfile, '\n'.join(f'{key}:{value}' for key, value in counts.items()))
+        print(f"---- File has been written to {args.outfile}")
+        sys.exit()
+
+    # Handle Warp10 option
+    ignored_words = get_ignored_words(full_text, 3) if args.Warp10 else []
+
+    context_flag = "T" if args.context else "F"
+
+    # Run spellcheck and collect suggestions
+    print("---- Running spellcheck....")
+    suggestions = process_lines(data, ignored_words, context_flag)
+
+    # Output results
+    save_text(args.outfile, '\n'.join(suggestions))
+    print(f"---- File has been written to {args.outfile}")
+
+if __name__ == "__main__":
+    main()
